@@ -98,7 +98,7 @@ exports[`task planner > should deduplicate overlapping external closures for all
     ],
     "runtime": [],
   },
-  "value": "6233822002282478864",
+  "value": "686027372371332424",
 }
 `;
 
@@ -137,7 +137,7 @@ exports[`task planner > should deduplicate overlapping external closures for exe
     ],
     "runtime": [],
   },
-  "value": "235537722388302509",
+  "value": "2423865972847824218",
 }
 `;
 
@@ -176,7 +176,7 @@ exports[`task planner > should deduplicate overlapping external closures for exp
     ],
     "runtime": [],
   },
-  "value": "17658889447241127891",
+  "value": "15227831062386141299",
 }
 `;
 

@@ -235,10 +235,14 @@ fn fold_equal_ranks(entries: &mut Vec<(u32, SharedStr)>, ranks: &KeyRanks) {
     }
 }
 
+/// External values go last, in value order: the node names they are keyed by
+/// depend on which version of a package holds the bare `npm:<package>` name,
+/// and that can differ between installs of the same lockfile.
 fn assemble_ranked_hash(
     mut entries: Vec<(u32, SharedStr)>,
     keys: &Arc<[SharedStr]>,
     ranks: &KeyRanks,
+    is_external: &[bool],
     inputs: HashInputsBuilder,
 ) -> HashDetails {
     if ranks.has_duplicate_keys {
@@ -247,8 +251,18 @@ fn assemble_ranked_hash(
         entries.sort_unstable_by_key(|(id, _)| ranks.of(*id));
     }
     let mut hasher = xxhash_rust::xxh3::Xxh3::new();
+    let mut externals = Vec::new();
     for (id, value) in &entries {
+        if is_external[*id as usize] {
+            externals.push(value);
+            continue;
+        }
         trace!("Adding {} ({}) to hash", value, keys[*id as usize]);
+        hasher.update(value.as_bytes());
+    }
+    externals.sort_unstable();
+    for value in externals {
+        trace!("Adding external {} to hash", value);
         hasher.update(value.as_bytes());
     }
     HashDetails {
@@ -601,6 +615,9 @@ impl TaskHasher {
             .map(|id| SharedStr::from(pool.label(id)))
             .collect();
         let key_ranks = instruction_key_ranks(&instruction_keys);
+        let is_external: Vec<bool> = (0..pool.len() as u32)
+            .map(|id| matches!(pool.get(id).value(), HashInstruction::External(_)))
+            .collect();
         // Classify once per instruction, so cache hits do not need the pool's
         // shard lock. The exhaustive match keeps env-dependent inputs out of
         // the shared slots even when new instruction variants are introduced.
@@ -718,7 +735,13 @@ impl TaskHasher {
             hashes.insert(
                 task_id.clone(),
                 trace_span!("Assembling hash", hash_id = task_id).in_scope(|| {
-                    assemble_ranked_hash(entries, &instruction_keys, &key_ranks, inputs)
+                    assemble_ranked_hash(
+                        entries,
+                        &instruction_keys,
+                        &key_ranks,
+                        &is_external,
+                        inputs,
+                    )
                 }),
             );
             Ok::<_, anyhow::Error>(())
@@ -1109,8 +1132,13 @@ mod tests {
                     if reverse {
                         entries.reverse();
                     }
-                    let actual =
-                        assemble_ranked_hash(entries, &keys, &ranks, HashInputsBuilder::default());
+                    let actual = assemble_ranked_hash(
+                        entries,
+                        &keys,
+                        &ranks,
+                        &vec![false; pool_size],
+                        HashInputsBuilder::default(),
+                    );
                     assert_eq!(actual.value, expected);
                 }
             }
@@ -1119,9 +1147,55 @@ mod tests {
             vec![],
             &Arc::from([]),
             &instruction_key_ranks(&[]),
+            &[],
             HashInputsBuilder::default(),
         );
         assert_eq!(empty.value, hash(b""));
+    }
+
+    #[test]
+    fn externals_hash_the_same_whichever_version_holds_the_bare_name() {
+        let hashed = |entries: &[(&str, &str)]| {
+            let keys: Arc<[SharedStr]> = entries
+                .iter()
+                .map(|(key, _)| key.to_string().into())
+                .collect();
+            let ranks = instruction_key_ranks(&keys);
+            let is_external: Vec<bool> = entries
+                .iter()
+                .map(|(key, _)| key.starts_with("npm:"))
+                .collect();
+            let entries = entries
+                .iter()
+                .enumerate()
+                .map(|(id, (_, value))| (id as u32, value.to_string().into()))
+                .collect();
+            assemble_ranked_hash(
+                entries,
+                &keys,
+                &ranks,
+                &is_external,
+                HashInputsBuilder::default(),
+            )
+            .value
+        };
+        let incremental_install = hashed(&[
+            ("app:{projectRoot}/**/*", "files"),
+            ("npm:is-number", "is-number-3"),
+            ("npm:is-number@7.0.0", "is-number-7"),
+        ]);
+        let fresh_install = hashed(&[
+            ("app:{projectRoot}/**/*", "files"),
+            ("npm:is-number", "is-number-7"),
+            ("npm:is-number@3.0.0", "is-number-3"),
+        ]);
+        let other_versions = hashed(&[
+            ("app:{projectRoot}/**/*", "files"),
+            ("npm:is-number", "is-number-7"),
+            ("npm:is-number@6.0.0", "is-number-6"),
+        ]);
+        assert_eq!(incremental_install, fresh_install);
+        assert_ne!(fresh_install, other_versions);
     }
 
     #[test]
@@ -1133,7 +1207,13 @@ mod tests {
         let entries = (0..keys.len() as u32)
             .map(|id| (id, value.clone()))
             .collect();
-        let result = assemble_ranked_hash(entries, &keys, &ranks, HashInputsBuilder::default());
+        let result = assemble_ranked_hash(
+            entries,
+            &keys,
+            &ranks,
+            &vec![false; keys.len()],
+            HashInputsBuilder::default(),
+        );
         let folded = hash(vec![&*value; keys.len()].join("\0").as_bytes());
         assert_eq!(result.value, hash(folded.as_bytes()));
         assert!(

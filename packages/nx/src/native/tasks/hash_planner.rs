@@ -1955,18 +1955,15 @@ fn resolve_files_glob(glob: &str, project_root: &str, project_name: &str) -> Str
     }
 }
 
-/// Without an exact `<pkg>`/`npm:<pkg>` node, every installed version of the
-/// package matches: picking one from the `HashMap` scan would change per process,
-/// and a bump to any of them can change what the task does.
+/// Every installed version of the package matches, the bare `npm:<pkg>` node
+/// included: which version holds the bare name depends on how `node_modules`
+/// was installed, and a bump to any of them can change what the task does. A
+/// name that is itself a node, such as `npm:<pkg>@<version>`, matches only it.
 fn find_external_dependency_node_names<'a>(
     package_name: &str,
     project_graph: &'a ProjectGraph,
 ) -> Vec<&'a String> {
-    let npm_name = format!("npm:{}", &package_name);
     if let Some((key, _)) = project_graph.external_nodes.get_key_value(package_name) {
-        return vec![key];
-    }
-    if let Some((key, _)) = project_graph.external_nodes.get_key_value(&npm_name) {
         return vec![key];
     }
     let mut matches: Vec<&String> = project_graph
@@ -1975,6 +1972,12 @@ fn find_external_dependency_node_names<'a>(
         .filter(|(_, node)| node.package_name.as_deref() == Some(package_name))
         .map(|(node_name, _)| node_name)
         .collect();
+    if matches.is_empty() {
+        let npm_name = format!("npm:{package_name}");
+        if let Some((key, _)) = project_graph.external_nodes.get_key_value(&npm_name) {
+            return vec![key];
+        }
+    }
     matches.sort();
     matches
 }
@@ -2746,17 +2749,33 @@ mod tests {
     }
 
     #[test]
-    fn external_dependency_prefers_the_exact_node() {
+    fn external_dependency_matches_the_bare_node_and_every_other_version() {
         let graph = graph_with_external_nodes(&[
             ("npm:is-number@6.0.0", "is-number"),
+            ("npm:is-number", "is-number"),
+            ("npm:is-number@7.0.0", "is-number"),
+        ]);
+        assert_eq!(
+            find_external_dependency_node_names("is-number", &graph),
+            vec![
+                "npm:is-number",
+                "npm:is-number@6.0.0",
+                "npm:is-number@7.0.0"
+            ]
+        );
+    }
+
+    #[test]
+    fn external_dependency_named_by_its_node_matches_only_that_node() {
+        let graph = graph_with_external_nodes(&[
             ("npm:is-number", "is-number"),
             ("npm:is-number@7.0.0", "is-number"),
             ("is-odd", "is-odd"),
             ("npm:is-odd@1.0.0", "is-odd"),
         ]);
         assert_eq!(
-            find_external_dependency_node_names("is-number", &graph),
-            vec!["npm:is-number"]
+            find_external_dependency_node_names("npm:is-number@7.0.0", &graph),
+            vec!["npm:is-number@7.0.0"]
         );
         assert_eq!(
             find_external_dependency_node_names("is-odd", &graph),

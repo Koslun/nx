@@ -47,6 +47,7 @@ describe('task hash result conversion and assembly', () => {
               executor: 'nx:run-commands',
               inputs: [
                 { env: 'SELECTED_ENV' },
+                { env: 'ENV-' },
                 { env: 'ENV-🤖' },
                 { externalDependencies: packages },
                 { json: '{workspaceRoot}/config.json', fields: ['version'] },
@@ -83,7 +84,10 @@ describe('task hash result conversion and assembly', () => {
     );
     const ids = Object.keys(tasks.tasks);
     const envs = Object.fromEntries(
-      ids.map((id) => [id, { SELECTED_ENV: id, 'ENV-🤖': 'shared' }])
+      ids.map((id) => [
+        id,
+        { SELECTED_ENV: id, 'ENV-': 'other', 'ENV-🤖': 'shared' },
+      ])
     );
     const hash = (selected: string[], collect: boolean, env = envs) =>
       hasher.hashPlans(
@@ -106,19 +110,25 @@ describe('task hash result conversion and assembly', () => {
         const keys = Object.keys(result.details).sort((a, b) =>
           Buffer.compare(Buffer.from(a), Buffer.from(b))
         );
-        // Independently reconstruct the existing hash format: UTF-8 ordered
-        // keys, concatenated values, xxh3 over those bytes with no separator.
-        expect(result.value).toBe(
-          hashArray([keys.map((key) => result.details[key]).join('')])
-        );
-        expect(
+        // Independently reconstruct the existing hash format: values of
+        // UTF-8 ordered keys, then the external values in sorted order,
+        // concatenated, xxh3 over those bytes with no separator.
+        const assemble = (orderedKeys: string[]) =>
           hashArray([
-            Object.keys(result.details)
-              .sort()
-              .map((key) => result.details[key])
-              .join(''),
-          ])
-        ).not.toBe(result.value);
+            [
+              ...orderedKeys
+                .filter((key) => !key.startsWith('npm:'))
+                .map((key) => result.details[key]),
+              ...orderedKeys
+                .filter((key) => key.startsWith('npm:'))
+                .map((key) => result.details[key])
+                .sort(),
+            ].join(''),
+          ]);
+        expect(result.value).toBe(assemble(keys));
+        expect(assemble(Object.keys(result.details).sort())).not.toBe(
+          result.value
+        );
         expect(keys).toContain('npm:dep-\ue000');
         expect(keys).toContain('npm:dep-🤖');
         expect(keys).toContain('env:ENV-🤖');
